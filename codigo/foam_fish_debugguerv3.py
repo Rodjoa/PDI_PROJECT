@@ -24,8 +24,8 @@ from BiomassEstimator.PostMaskProcessing.PostMaskProcessingClass import PostMask
 ####################################### CONFIGURATION #########################################
 BASE_FOLDER                 = "/home/mass_estimation/pending_videos_output/FoamFishExperiments/"
 SVO_FOLDER                  = "torsion_away_from_camera_test"#"torsion_away_from_camera_test"
-FRAMES                      = [301] #Keep empty to evaluate all frames in target folder
-ACTIVATE_VISUALIZATION      = True
+FRAMES                      = [] #Keep empty to evaluate all frames in target folder
+ACTIVATE_VISUALIZATION      = False
 ACTIVATE_ROTATION_VIS       = False
 PLOT_TRAJECTORY             = False
 PLOT_LENGTHS                = True
@@ -63,41 +63,56 @@ def analise_samples(base_folder, obj_folder, frames, vis=False):
         print("\nFrame: {}".format(frame_number))
 
         # Carga datos de entrada
-        fish_frame, depth_map, pcd = get_frame_data(input_data_path, frame_number)
-        fish_mask = cv2.imread(input_data_path + "/data_mask/{}.png".format(frame_number), cv2.IMREAD_GRAYSCALE)
-        bbox = get_bbox(fish_mask)
-        post_mask_processing.set_bbox(bbox)
+        fish_frame, depth_map, pcd = get_frame_data(input_data_path, frame_number) # Carga datos de entrada: imagen, mapa de profundidad y nube de puntos
+        fish_mask = cv2.imread(input_data_path + "/data_mask/{}.png".format(frame_number), cv2.IMREAD_GRAYSCALE) # Carga la máscara de pez correspondiente al frame en escala de grises
+        bbox = get_bbox(fish_mask) # Obtiene el cuadro delimitador (bounding box) de la máscara
+        post_mask_processing.set_bbox(bbox) # Configura el bounding box en el objeto de postprocesamiento
 
         # 1. Preprocesamiento mejorado de la máscara
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        fish_mask = cv2.morphologyEx(fish_mask, cv2.MORPH_CLOSE, kernel)  # Cerrar huecos
-        fish_mask = cv2.GaussianBlur(fish_mask, (3, 3), 0)  # Suavizar bordes
-        edges = cv2.Canny(fish_mask, 50, 150)  # Detectar bordes
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)) #Genera un elemento estructurante con forma de elipse, usado para operaciones morfológicas.
+        fish_mask = cv2.morphologyEx(fish_mask, cv2.MORPH_CLOSE, kernel)  # Cerrar huecos con operación de Cierre (Dilatación seguida de Erosión)
+        fish_mask = cv2.GaussianBlur(fish_mask, (3, 3), 0)  # Aplica filtro Gaussiano para suavizar bordes y reducir ruido
+        edges = cv2.Canny(fish_mask, 50, 150)  # Detectar bordes mediante filtro de Canny, produciendo imagen binaria que resalta contornos
 
         # 2. Validación con mapa de profundidad
-        depth_map_filtered = cv2.bilateralFilter(depth_map, 10, 70, 70)  # Suavizar profundidad sin perder bordes
+        depth_map_filtered = cv2.bilateralFilter(depth_map, 10, 70, 70)  # Aplica filtro bilateral al mapa de profundidad, para suavizar imagen sin perder bordes
+        #Se calculan gradientes en las direcciones X e Y del mapa de profundidad para detectar cambios significativos en valores de profundidad.
         gradient_x = cv2.Sobel(depth_map_filtered, cv2.CV_64F, 1, 0, ksize=5)
         gradient_y = cv2.Sobel(depth_map_filtered, cv2.CV_64F, 0, 1, ksize=5)
-        magnitude = np.sqrt(gradient_x**2 + gradient_y**2)
-        fish_mask[magnitude < 10] = 0  # Elimina regiones de bajo gradiente
+        
+        magnitude = np.sqrt(gradient_x**2 + gradient_y**2) #Calculo de magnitud del gradiente combinando las derivadas X e Y.
+                                                           #Esto identifica áreas donde hay cambios bruscos en la profundidad.
+
+        #fish_mask[magnitude < 10] = 0  # Elimina regiones de bajo gradiente
 
         # Procesar máscara y verificar
+        # Se procede a procesar la máscara y validar su compatibilidad con el mapa de profundidad
         fish_mask, message = post_mask_processing.handle_mask_depth_data(fish_mask, depth_map, proportion=0.35)
+        #Retorna una máscara procesada y un mensaje.
+        #parámetro 'proportion' determina el nivel aceptable de solapamiento entre màscara y datos de profundidad
+        
         if fish_mask is None:
-            print("Unviable sample: {}".format(message))
-            continue
+            print("Unviable sample: {}".format(message)) #Se evalùa si la máscara es válida, si no lo es, entonces se descarta.
+            continue 
 
         # 3. Suavizado y validación de contornos
+        # Detecta contornos en la máscara procesada
         contours, _ = cv2.findContours(fish_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Si hay contornos, se selecciona el más grande (el que ocupa más píxeles), para procesar el contorno más significativo
         if contours:
             largest_contour = max(contours, key=cv2.contourArea)
+            # Se procede a suavizar el contorno más grande reduciendo vértices con una tolerancia
             smoothed_contour = cv2.approxPolyDP(largest_contour, epsilon=0.01 * cv2.arcLength(largest_contour, True), closed=True)
-            fish_mask[:] = 0
-            cv2.drawContours(fish_mask, [smoothed_contour], -1, 255, thickness=-1)
-
-        bgr_fish_mask = post_mask_processing.get_bgr_mask()
-        mask_data_distribution = get_bgr_mask_color_proportion(bgr_fish_mask)
-        mask_data_list.append(mask_data_distribution)
+            fish_mask[:] = 0    # Limpia la máscara original
+            cv2.drawContours(fish_mask, [smoothed_contour], -1, 255, thickness=-1) # Dibuja el contorno suavizado en la máscara
+            
+  
+        # Generación de máscara BGR y cálculo de distribución de colores
+        
+        bgr_fish_mask = post_mask_processing.get_bgr_mask()                   # Convierte la máscara procesada en formato BGR
+        mask_data_distribution = get_bgr_mask_color_proportion(bgr_fish_mask) # Calcula la proporción de colores en la máscara BGR
+        mask_data_list.append(mask_data_distribution)                         # Guarda los datos de distribución de colores
 
         # Calcular longitud y altura
         start = time()
